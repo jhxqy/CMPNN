@@ -67,7 +67,6 @@ class MPNEncoder(nn.Module):
         self.b2a_bond_multihead_attention = MultiHeadSelfAttention(300,300,5)
         self.instance_norm = nn.InstanceNorm1d(900, affine=False)
 
-        self.linear_layer = nn.Linear(1200, 300)
 
         # Dropout
         self.dropout_layer = nn.Dropout(p=self.dropout)
@@ -97,7 +96,7 @@ class MPNEncoder(nn.Module):
         
         self.gru = BatchGRU(self.hidden_size)
         
-        self.lr = nn.Linear(self.hidden_size*3, self.hidden_size, bias=self.bias)
+        self.lr = nn.Linear(self.hidden_size*2, self.hidden_size, bias=self.bias)
         
 
     def forward(self,mol_graph: BatchMolGraph, features_batch=None) -> torch.FloatTensor:
@@ -117,17 +116,19 @@ class MPNEncoder(nn.Module):
         message_bond = self.act_func(input_bond)
         input_bond = self.act_func(input_bond)
         
-        message_atom = self.atom_multihead_attention(message_atom)
-        message_atom = self.dropout_layer(self.act_func(message_atom))
 
         a2b_agg_message = index_select_ND(message_bond, a2b)
         a2b_agg_message = a2b_agg_message.sum(dim=1)
+        all_message =  torch.cat([message_atom + a2b_agg_message],1)
+
+        all_message = self.atom_multihead_attention(all_message)
+        # all_message = self.dropout_layer(self.act_func(all_message))
 
         # b2a_agg_message = index_select_ND(message_bond, b2a)
         # b2a_agg_message = b2a_agg_message.sum(dim=1)
 
-        a2b_message_bond = self.a2b_bond_multihead_attention(a2b_agg_message)
-        a2b_message_bond = self.dropout_layer(self.act_func(a2b_message_bond))
+        # a2b_message_bond = self.a2b_bond_multihead_attention(a2b_agg_message)
+        # a2b_message_bond = self.dropout_layer(self.act_func(a2b_message_bond))
 
         # b2a_message_bond = self.b2a_bond_multihead_attention(b2a_agg_message)
         # b2a_message_bond = self.dropout_layer(self.act_func(b2a_message_bond))
@@ -153,8 +154,8 @@ class MPNEncoder(nn.Module):
         # print("atom")
         # print(message_atom.shape)
         # message_bond = self.linear_layer(message_bond)
-        agg_message = self.instance_norm(torch.cat([message_atom, a2b_message_bond, input_atom], 1))
-
+        # agg_message = self.instance_norm(torch.cat([all_message, input_atom], 1))
+        agg_message = torch.cat([all_message, input_atom], 1)
         agg_message = self.lr(agg_message)
         agg_message = self.gru(agg_message, a_scope)
         
