@@ -10,6 +10,43 @@ from chemprop.nn_utils import index_select_ND, get_activation_function
 import math
 import torch.nn.functional as F
 
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, dim_in, d_model, num_heads = 3):
+        super(MultiHeadSelfAttention, self).__init__()
+        
+        self.dim_in = dim_in
+        self.d_model = d_model
+        self.num_heads = num_heads
+
+        assert d_model % num_heads == 0, "d_model must be multiple of num_heads"
+
+        self.linear_q = nn.Linear(dim_in,d_model)
+        self.linear_k = nn.Linear(dim_in,d_model)
+        self.linear_v = nn.Linear(dim_in,d_model)
+        self.scale = 1 / math.sqrt(d_model // num_heads)
+
+        self.fc = nn.Linear(d_model,dim_in)
+
+    def forward(self, x):
+        n, dim_in = x.shape
+        # print("self.dim_in:%d,dim_in:%d",self.dim_in,dim_in)
+        assert dim_in == self.dim_in
+        nh = self.num_heads
+        dk = self.d_model // nh
+
+        q = self.linear_q(x).reshape(n, nh, dk).transpose(1,2)
+        k = self.linear_k(x).reshape(n, nh, dk).transpose(1,2)
+        v = self.linear_v(x).reshape(n, nh, dk).transpose(1,2)
+
+        dist = torch.matmul(q,k.transpose(-2, -1)) * self.scale
+        dist = torch.softmax(dist, dim=-1)
+
+        att = torch.matmul(dist, v)
+        att = att.transpose(1,2).reshape(n, self.d_model)
+
+        output = self.fc(att)
+
+        return output
 class MPNEncoder(nn.Module):
     def __init__(self, args: Namespace, atom_fdim: int, bond_fdim: int):
         super(MPNEncoder, self).__init__()
@@ -25,6 +62,9 @@ class MPNEncoder(nn.Module):
         self.features_only = args.features_only
         self.use_input_features = args.use_input_features
         self.args = args
+        self.atom_multihead_attention = MultiHeadSelfAttention(300,300)
+        self.bond_multihead_attention = MultiHeadSelfAttention(300,300)
+        self.linear_layer = nn.Linear(1200, 300)
 
         # Dropout
         self.dropout_layer = nn.Dropout(p=self.dropout)
@@ -73,22 +113,36 @@ class MPNEncoder(nn.Module):
         input_bond = self.W_i_bond(f_bonds)  # num_bonds x hidden_size
         message_bond = self.act_func(input_bond)
         input_bond = self.act_func(input_bond)
-        # Message passing
-        for depth in range(self.depth - 1):
-            agg_message = index_select_ND(message_bond, a2b)
-            agg_message = agg_message.sum(dim=1) * agg_message.max(dim=1)[0]
-            message_atom = message_atom + agg_message
-            
-            # directed graph
-            rev_message = message_bond[b2revb]  # num_bonds x hidden
-            message_bond = message_atom[b2a] - rev_message  # num_bonds x hidden
-            
-            message_bond = self._modules[f'W_h_{depth}'](message_bond)
-            message_bond = self.dropout_layer(self.act_func(input_bond + message_bond))
         
+        message_atom = self.atom_multihead_attention(message_atom)
         agg_message = index_select_ND(message_bond, a2b)
-        agg_message = agg_message.sum(dim=1) * agg_message.max(dim=1)[0]
-        agg_message = self.lr(torch.cat([agg_message, message_atom, input_atom], 1))
+        agg_message = agg_message.sum(dim=1)
+        message_bond = self.dropout_layer(self.act_func(agg_message))
+        message_bond = self.bond_multihead_attention(agg_message)
+        
+
+
+        # Message passing
+        # for depth in range(self.depth - 1):
+        #     agg_message = index_select_ND(message_bond, a2b)
+        #     agg_message = agg_message.sum(dim=1) * agg_message.max(dim=1)[0]
+        #     message_atom = message_atom + agg_message
+            
+        #     # directed graph
+        #     rev_message = message_bond[b2revb]  # num_bonds x hidden
+        #     message_bond = message_atom[b2a] - rev_message  # num_bonds x hidden
+            
+        #     message_bond = self._modules[f'W_h_{depth}'](message_bond)
+        #     message_bond = self.dropout_layer(self.act_func(input_bond + message_bond))
+        
+        # agg_message = index_select_ND(message_bond, a2b)
+        # agg_message = agg_message.sum(dim=1) * agg_message.max(dim=1)[0]
+        # print("bond")
+        # print(message_bond.shape)
+        # print("atom")
+        # print(message_atom.shape)
+        # message_bond = self.linear_layer(message_bond)
+        agg_message = self.lr(torch.cat([message_bond, message_atom, input_atom], 1))
         agg_message = self.gru(agg_message, a_scope)
         
         atom_hiddens = self.act_func(self.W_o(agg_message))  # num_atoms x hidden

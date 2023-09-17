@@ -323,6 +323,7 @@ def get_class_sizes(data: MoleculeDataset) -> List[List[float]]:
 
     class_sizes = []
     for task_targets in valid_targets:
+        print(len( set(np.unique(task_targets))))
         # Make sure we're dealing with a binary classification task
         assert set(np.unique(task_targets)) <= {0, 1}
 
