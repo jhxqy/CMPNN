@@ -9,7 +9,15 @@ from chemprop.features import BatchMolGraph, get_atom_fdim, get_bond_fdim, mol2g
 from chemprop.nn_utils import index_select_ND, get_activation_function
 import math
 import torch.nn.functional as F
+def tensor_filter(t,bool_vector,reverse):
 
+    mask = bool_vector.view(-1, 1).expand_as(t)  # 将布尔向量扩展为和张量相同的形状
+    filtered_tensor = t.clone()  # 克隆原始张量，以保持维度不变
+    if reverse:
+        filtered_tensor[mask] = 0  # 将不符合条件的行设置为0
+    else:
+        filtered_tensor[~mask] = 0
+    return filtered_tensor
 class MPNEncoder(nn.Module):
     def __init__(self, args: Namespace, atom_fdim: int, bond_fdim: int):
         super(MPNEncoder, self).__init__()
@@ -60,11 +68,11 @@ class MPNEncoder(nn.Module):
     def forward(self,mol_graph: BatchMolGraph, features_batch=None) -> torch.FloatTensor:
 
         f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, bonds = mol_graph.get_components()
+        brics_bonds = mol_graph.brics_bonds
         if self.args.cuda or next(self.parameters()).is_cuda:
-            f_atoms, f_bonds, a2b, b2a, b2revb = (
+            f_atoms, f_bonds, a2b, b2a, b2revb,brics_bonds = (
                     f_atoms.cuda(), f_bonds.cuda(), 
-                    a2b.cuda(), b2a.cuda(), b2revb.cuda())
-            
+                    a2b.cuda(), b2a.cuda(), b2revb.cuda(), brics_bonds.cuda())
         # Input
         input_atom = self.W_i_atom(f_atoms)  # num_atoms x hidden_size
         input_atom = self.act_func(input_atom)
@@ -78,11 +86,28 @@ class MPNEncoder(nn.Module):
             agg_message = index_select_ND(message_bond, a2b)
             agg_message = agg_message.sum(dim=1) * agg_message.max(dim=1)[0]
             message_atom = message_atom + agg_message
-            
+            # print("\n")
+            # print("message_bond",message_bond.shape)
+            # print("bonds",bonds.shape)
+            # print("b2revb",b2revb.shape)
+            # print("message_atom",message_atom.shape)
+            # print("b2a",b2a.shape)  # message_atom和B2A咋能搞到一起的..
+            # print("message_atom[b2a]",message_atom[b2a].shape)
+            # print("message_bond[b2revb]", message_bond[b2revb].shape)
+            # print("\n")
             # directed graph
             rev_message = message_bond[b2revb]  # num_bonds x hidden
-            message_bond = message_atom[b2a] - rev_message  # num_bonds x hidden
+            message_bond_d_all = message_atom[b2a] - rev_message  # num_bonds x hidden
+    
+            bond_message_d = tensor_filter(message_bond_d_all,brics_bonds,False)
+
+            bond_message_ud_all = (message_bond  + message_bond[b2revb]) / 2
+
+            bond_message_ud = tensor_filter(bond_message_ud_all,brics_bonds,True)
             
+            message_bond = bond_message_d + bond_message_ud
+            
+
             message_bond = self._modules[f'W_h_{depth}'](message_bond)
             message_bond = self.dropout_layer(self.act_func(input_bond + message_bond))
         

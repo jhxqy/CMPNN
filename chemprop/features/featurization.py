@@ -2,8 +2,10 @@ from argparse import Namespace
 from typing import List, Tuple, Union
 
 from rdkit import Chem
+from rdkit.Chem.BRICS import FindBRICSBonds, BreakBRICSBonds
 import torch
 import numpy as np
+from rdkit.Chem import BRICS
 
 # Atom feature sizes
 MAX_ATOMIC_NUM = 100
@@ -58,7 +60,16 @@ def get_bond_fdim(args: Namespace) -> int:
     :param: Arguments.
     """
     return BOND_FDIM
-
+def GetBricsBonds(mol):
+    brics_bonds = list()
+    brics_bonds_rules = list()
+    bonds_tmp = FindBRICSBonds(mol)
+    bonds = [b for b in bonds_tmp]
+    for item in bonds:# item[0] is bond, item[1] is brics type
+        brics_bonds.append([int(item[0][0]), int(item[0][1])])
+        brics_bonds.append([int(item[0][1]), int(item[0][0])])
+    return brics_bonds
+   
 
 def onek_encoding_unk(value: int, choices: List[int]) -> List[int]:
     """
@@ -151,7 +162,9 @@ class MolGraph:
         self.a2b = []  # mapping from atom index to incoming bond indices
         self.b2a = []  # mapping from bond index to the index of the atom the bond is coming from
         self.b2revb = []  # mapping from bond index to the index of the reverse bond
+        self.b2forwardb = []
         self.bonds = []
+        self.brics_bonds=[] 
         # Convert smiles to molecule
         mol = Chem.MolFromSmiles(smiles)
 
@@ -165,7 +178,7 @@ class MolGraph:
 
         for _ in range(self.n_atoms):
             self.a2b.append([])
-
+        b_bonds = GetBricsBonds(mol)
         # Get bond features
         for a1 in range(self.n_atoms):
             for a2 in range(a1 + 1, self.n_atoms):
@@ -173,7 +186,11 @@ class MolGraph:
 
                 if bond is None:
                     continue
-
+                beginatom = bond.GetBeginAtomIdx()
+                endatom = bond.GetEndAtomIdx()
+                is_brics = False
+                if [beginatom, endatom] in b_bonds:
+                    is_brics = True
                 f_bond = bond_features(bond)
 
                 if args.atom_messages:
@@ -194,6 +211,12 @@ class MolGraph:
                 self.b2revb.append(b1)
                 self.n_bonds += 2
                 self.bonds.append(np.array([a1, a2]))
+                if is_brics:
+                    self.brics_bonds.append(True)
+                    self.brics_bonds.append(True)
+                else:
+                    self.brics_bonds.append(False)
+                    self.brics_bonds.append(False)
         # rectify a2b
 # =============================================================================
 #         for ix in range(len(self.a2b)):
@@ -235,7 +258,7 @@ class BatchMolGraph:
         self.n_bonds = 1  # number of bonds (start at 1 b/c need index 0 as padding)
         self.a_scope = []  # list of tuples indicating (start_atom_index, num_atoms) for each molecule
         self.b_scope = []  # list of tuples indicating (start_bond_index, num_bonds) for each molecule
-
+        self.brics_bonds = []
         # All start with zero padding so that indexing with zero padding returns zeros
         f_atoms = [[0] * self.atom_fdim]  # atom features
         f_bonds = [[0] * self.bond_fdim]  # combined atom/bond features
@@ -243,10 +266,11 @@ class BatchMolGraph:
         b2a = [0]  # mapping from bond index to the index of the atom the bond is coming from
         b2revb = [0]  # mapping from bond index to the index of the reverse bond
         bonds = [[0,0]]
+        brics_bonds = [False]
         for mol_graph in mol_graphs:
             f_atoms.extend(mol_graph.f_atoms)
             f_bonds.extend(mol_graph.f_bonds)
-
+            brics_bonds.extend(mol_graph.brics_bonds)
             for a in range(mol_graph.n_atoms):
                 a2b.append([b + self.n_bonds for b in mol_graph.a2b[a]]) #  if b!=-1 else 0
 
@@ -270,6 +294,8 @@ class BatchMolGraph:
         self.b2a = torch.LongTensor(b2a)
         self.bonds = torch.LongTensor(bonds)
         self.b2revb = torch.LongTensor(b2revb)
+        self.brics_bonds =  torch.LongTensor(brics_bonds)
+
         self.b2b = None  # try to avoid computing b2b b/c O(n_atoms^3)
         self.a2a = None  # only needed if using atom messages
 
